@@ -5,6 +5,7 @@ use bevy_tasks::TaskPool;
 use clap::{Parser, Subcommand};
 
 use std::io::BufRead;
+use std::fmt::Display;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -20,6 +21,8 @@ enum Commands {
     CountRefGaps { input: String },
     #[command(about = "Count Duplicate Reference Entries")]
     CountDupeRefs { input: String },
+    #[command(about = "Remove Alignment Blocks with Duplicate Reference Entries")]
+    RemoveDupeRefBlocks { input: String },
     #[command(about = "Split MAF File")]
     Split { input: String, output_path: String },
 }
@@ -36,6 +39,9 @@ fn main() {
         Commands::CountDupeRefs { input } => {
             count_dupe_refs(input);
         }
+        Commands::RemoveDupeRefBlocks { input } => {
+            remove_dupe_ref_blocks(input);
+        }
     }
 }
 
@@ -47,29 +53,51 @@ enum MafReadState {
     BlankLine,
 }
 
-enum Strand {
+pub enum Strand {
     Plus,
     Minus,
 }
 
 // https://genome.ucsc.edu/FAQ/FAQformat.html#format5
-enum MafLine {
+pub enum MafLine {
     Comment(String),
     AlignmentBlockLine(String),
     SequenceLine(String, u64, u64, Strand, u64, String),
     BlankLine,
 }
 
-fn parse_maf_line<'a>(line: &'a str) -> MafLine {
+impl Display for MafLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MafLine::Comment(x) => {
+                write!(f, "#{}", x)
+            }
+            MafLine::AlignmentBlockLine(x) => {
+                write!(f, "a{}", x)
+            }
+            MafLine::SequenceLine(seqid, start, length, strand, src_size, text) => {
+                write!(f, "s {} {} {} {} {} {}", seqid, start, length, match strand {
+                    Strand::Plus => "+",
+                    Strand::Minus => "-",
+                }, src_size, text)
+            }
+            MafLine::BlankLine => {
+                write!(f, "")
+            }
+        }
+    }
+}
+
+fn parse_maf_line(line: &str) -> MafLine {
     // Match on the first character
     match line.chars().next() {
         Some('#') => {
             // Remove first character
             return MafLine::Comment(line[1..].to_string());
-        }
+        },
         Some('a') => {
             return MafLine::AlignmentBlockLine(line[1..].to_string());
-        }
+        },
         Some('s') => {
             // Split by tabs and convert to:
             // String, u64, u64, Strand, u64, String
@@ -87,12 +115,12 @@ fn parse_maf_line<'a>(line: &'a str) -> MafLine {
             let text = split.next().unwrap().to_string();
 
             return MafLine::SequenceLine(seqid, start, length, strand, src_size, text);
-        }
+        },
         None => {
-            
-        }
+            return MafLine::BlankLine;
+        },
         _ => {
-            
+            return MafLine::BlankLine;
         }
     }
 }
@@ -214,4 +242,93 @@ fn count_dupe_refs(input: &String) {
 
 pub fn analyze() {
     App::new().add_plugin(bevy_app::ScheduleRunnerPlugin).run();
+}
+
+pub struct MafParser {
+    lines: std::io::Lines<std::io::BufReader<std::fs::File>>,
+    current_block: Vec<MafLine>,
+    block_start_line: Option<MafLine>,
+}
+
+impl Iterator for MafParser {
+    type Item = Vec<MafLine>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+
+        while let Some(line) = self.lines.next() {
+            let line = line.unwrap();
+
+            // Match on the first character
+            let x = parse_maf_line(&line);
+
+            if let MafLine::BlankLine = x {
+                if self.current_block.len() > 0 {
+                    let blank = Vec::with_capacity(self.current_block.len());
+                    let block = std::mem::replace(&mut self.current_block, blank);
+                    return Some(block);
+                } else {
+                    continue;
+                }
+            } else {
+                self.current_block.push(x);
+            }
+        }
+        return None;
+    }
+}
+
+// remove_dupe_ref_blocks
+fn remove_dupe_ref_blocks(input: &String) {
+    // Open file
+    let file = std::fs::File::open(input).unwrap();
+    let mut parser = maf_parser(file);
+    let mut reference = String::new();
+    let mut refcount = 0;
+    let mut seqcount = 0;
+    let mut removed_count = 0;
+
+    'outer: while let Some(block) = parser.next() {
+        seqcount = 0;
+        refcount = 0;
+
+        for line in block.iter() {
+            match line {
+                MafLine::SequenceLine(seqid, _, _, _, _, _) => {
+                    seqcount += 1;
+
+                    let speciesid = seqid.split('.').next().unwrap();
+
+                    if seqcount == 1 {
+                        reference = speciesid.to_string();
+                    } else if seqcount > 1 && *speciesid == reference {
+                        removed_count += 1;
+                        continue 'outer;
+                    }
+                    // println!("{}, {}, {}", seqid, reference, seqcount);
+                }
+                _ => {}
+            }
+        }
+
+        for line in block {
+            println!("{}", line);
+        }
+        println!();
+    }
+
+    // Print to STDERR
+    eprintln!("Removed {} blocks", removed_count);
+    
+}
+
+// Create an iterator from a bufreader
+pub fn maf_parser(file: std::fs::File) -> MafParser {
+    let reader = std::io::BufReader::new(file);
+    let lines = reader.lines();
+
+    MafParser {
+        lines,
+        current_block: Vec::new(),
+        block_start_line: None,
+    }
 }
