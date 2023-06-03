@@ -4,8 +4,8 @@ use bevy_ecs::prelude::*;
 use bevy_tasks::TaskPool;
 use clap::{Parser, Subcommand};
 
-use std::io::BufRead;
 use std::fmt::Display;
+use std::io::BufRead;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -76,10 +76,19 @@ impl Display for MafLine {
                 write!(f, "a{}", x)
             }
             MafLine::SequenceLine(seqid, start, length, strand, src_size, text) => {
-                write!(f, "s {} {} {} {} {} {}", seqid, start, length, match strand {
-                    Strand::Plus => "+",
-                    Strand::Minus => "-",
-                }, src_size, text)
+                write!(
+                    f,
+                    "s {} {} {} {} {} {}",
+                    seqid,
+                    start,
+                    length,
+                    match strand {
+                        Strand::Plus => "+",
+                        Strand::Minus => "-",
+                    },
+                    src_size,
+                    text
+                )
             }
             MafLine::BlankLine => {
                 write!(f, "")
@@ -94,10 +103,10 @@ fn parse_maf_line(line: &str) -> MafLine {
         Some('#') => {
             // Remove first character
             return MafLine::Comment(line[1..].to_string());
-        },
+        }
         Some('a') => {
             return MafLine::AlignmentBlockLine(line[1..].to_string());
-        },
+        }
         Some('s') => {
             // Split by tabs and convert to:
             // String, u64, u64, Strand, u64, String
@@ -115,10 +124,10 @@ fn parse_maf_line(line: &str) -> MafLine {
             let text = split.next().unwrap().to_string();
 
             return MafLine::SequenceLine(seqid, start, length, strand, src_size, text);
-        },
+        }
         None => {
             return MafLine::BlankLine;
-        },
+        }
         _ => {
             return MafLine::BlankLine;
         }
@@ -254,7 +263,6 @@ impl Iterator for MafParser {
     type Item = Vec<MafLine>;
 
     fn next(&mut self) -> Option<Self::Item> {
-
         while let Some(line) = self.lines.next() {
             let line = line.unwrap();
 
@@ -318,7 +326,6 @@ fn remove_dupe_ref_blocks(input: &String) {
 
     // Print to STDERR
     eprintln!("Removed {} blocks", removed_count);
-    
 }
 
 // Create an iterator from a bufreader
