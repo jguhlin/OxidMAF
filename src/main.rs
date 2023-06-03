@@ -325,7 +325,7 @@ fn remove_dupe_ref_blocks(input: &String) {
     }
 
     // Print to STDERR
-    eprintln!("Removed {} blocks", removed_count);
+    // eprintln!("Removed {} blocks", removed_count);
 }
 
 // Create an iterator from a bufreader
