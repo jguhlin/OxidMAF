@@ -1,11 +1,12 @@
-use bevy_app::prelude::*;
-use bevy_app::App;
-use bevy_ecs::prelude::*;
-use bevy_tasks::TaskPool;
+// use bevy_app::prelude::*;
+// use bevy_app::App;
+// use bevy_ecs::prelude::*;
+// use bevy_tasks::TaskPool;
 use clap::{Parser, Subcommand};
 
 use std::fmt::Display;
 use std::io::BufRead;
+use std::io::{Seek, SeekFrom, Write};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -25,6 +26,13 @@ enum Commands {
     RemoveDupeRefBlocks { input: String },
     #[command(about = "Split MAF File")]
     Split { input: String, output_path: String },
+    #[command(about = "Process GERP Scores from .maf, .rates, and .elems files and export to .tsv")]
+    ProcessGERP {
+        maf: String,
+        rates: String,
+        elems: String,
+        output: String,
+    },
 }
 
 fn main() {
@@ -41,6 +49,14 @@ fn main() {
         }
         Commands::RemoveDupeRefBlocks { input } => {
             remove_dupe_ref_blocks(input);
+        }
+        Commands::ProcessGERP {
+            maf,
+            rates,
+            elems,
+            output,
+        } => {
+            process_gerp(maf, rates, elems, output);
         }
     }
 }
@@ -249,10 +265,6 @@ fn count_dupe_refs(input: &String) {
     println!("Length: {}", seqlengths);
 }
 
-pub fn analyze() {
-    App::new().add_plugin(bevy_app::ScheduleRunnerPlugin).run();
-}
-
 pub struct MafParser {
     lines: std::io::Lines<std::io::BufReader<std::fs::File>>,
     current_block: Vec<MafLine>,
@@ -337,5 +349,175 @@ pub fn maf_parser(file: std::fs::File) -> MafParser {
         lines,
         current_block: Vec::new(),
         block_start_line: None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct GERPElem {
+    region: String,
+    start: u64,
+    end: u64,
+    score: f32,
+    pval: f64,
+    expected: f64,
+    observed: f64,
+    length: f64,
+}
+
+// Handy one liner function to create GERPElem
+impl GERPElem {
+    fn new(
+        region: String,
+        start: u64,
+        end: u64,
+        score: f32,
+        pval: f64,
+        expected: f64,
+        observed: f64,
+        length: f64,
+    ) -> GERPElem {
+        GERPElem {
+            region,
+            start,
+            end,
+            score,
+            pval,
+            expected,
+            observed,
+            length,
+        }
+    }
+
+    // Is given position within this element?
+    fn contains(&self, pos: u64) -> bool {
+        if pos >= self.start && pos <= self.end {
+            return true;
+        } else {
+            return false;
+        }
+    }
+}
+
+// process_gerp(maf, rates, elems, output);
+fn process_gerp(
+    maf: &String,
+    rates: &String,
+    elems: &String,
+    output: &String,
+) {
+    let maf_fh = std::fs::File::open(maf).expect("Unable to open maf file");
+    let rates_fh = std::fs::File::open(rates).expect("Unable to open rates file");
+    let elems_fh = std::fs::File::open(elems).expect("Unable to open elems file");
+    let output_fh = std::fs::File::create(output).expect("Unable to create file");
+
+    let mut rates_fh = std::io::BufReader::new(rates_fh);
+    let mut elems_fh = std::io::BufReader::new(elems_fh);
+    let mut output_fh = std::io::BufWriter::new(output_fh);
+
+    // Read first line of MAF file
+    let mut maf_parser = maf_parser(maf_fh);
+    let mut maf_block = maf_parser.next().unwrap();
+
+    // Get length of chromosome
+    let mut chrom_length = 0;
+    for line in maf_block.iter() {
+        match line {
+            // MafLine::SequenceLine(seqid, start, length, strand, src_size, text) => {
+            MafLine::SequenceLine(_, _, _, _, length, _) => {
+                chrom_length = *length;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    // Count lines in rates file
+    let mut rates_count = 0;
+    // Borrow lines iterator
+    let mut lines = rates_fh.lines();
+    while let Some(_) = lines.next() {
+        rates_count += 1;
+    }
+
+    // GERP Sanity Check
+    println!("Rates Length: {} Chrom Length: {}", rates_count, chrom_length);
+    assert!(rates_count <= chrom_length, "Rates file length does not match chromosome length - This program expect GERP scores to be split by chromosome");
+
+    // Rewind file
+    let rates_fh = std::fs::File::open(rates).expect("Unable to open rates file");
+    let mut rates_fh = std::io::BufReader::new(rates_fh);
+
+    // Import elems file
+    let mut elems: Vec<GERPElem> = elems_fh
+        .lines()
+        .map(|line| {
+            let line = line.unwrap();
+            let split: Vec<&str> = line.split_whitespace().collect();
+
+            let region = split[0].to_string();
+            let start = split[1].parse::<u64>().unwrap();
+            let end = split[2].parse::<u64>().unwrap();
+            let score = split[3].parse::<f32>().unwrap();
+            let pval = split[4].parse::<f64>().unwrap();
+            let expected = split[5].parse::<f64>().unwrap();
+            let observed = split[6].parse::<f64>().expect(format!("Unable to parse observed value: {}", split[6]).as_str());
+            let length = split[7].parse::<f64>().expect(format!("Unable to parse length value: {}", split[7]).as_str());
+
+            GERPElem::new(region, start, end, score, pval, expected, observed, length)
+        })
+        .collect();
+
+    // Sort elems by start position
+    elems.sort_by(|a, b| a.start.cmp(&b.start));
+
+    let mut pos = 0;
+
+    // Iterate through rates file
+    let mut lines = rates_fh.lines();
+    let mut in_elem = false;
+    while let Some(line) = lines.next() {
+        pos += 1;
+        in_elem = false;
+
+        let line = line.unwrap();
+        let split: Vec<&str> = line.split_whitespace().collect();
+
+        let neutral_rate = split[0].parse::<f64>().expect(format!("Unable to parse neutral rate: {}", split[0]).as_str());
+        let score = split[1].parse::<f32>().unwrap();
+
+        // If both are zero skip
+        if neutral_rate == 0.0 && score == 0.0 {
+            continue;
+        }
+
+        // Find element that contains this position
+        let mut elem: Option<&GERPElem> = None;
+        for e in elems.iter() {
+            if e.contains(pos) {
+                elem = Some(e);
+                in_elem = true;
+                break;
+            }
+        }
+
+        // Write to output
+        match elem {
+            Some(e) => {
+                writeln!(
+                    output_fh,
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    pos, neutral_rate, score, in_elem, e.start, e.end, e.score, e.pval, e.expected, e.observed, e.length
+                )
+                .unwrap();
+            }
+            None => {
+                // Write to output, NA for element if not contained within a conserved element
+                writeln!(
+                    output_fh,
+                    "{}\t{}\t{}\t{}\tNA\tNA\tNA\tNA\tNA\tNA\tNA",
+                    pos, neutral_rate, score, in_elem
+                ).unwrap();
+            }
+        }
     }
 }
