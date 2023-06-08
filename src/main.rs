@@ -514,7 +514,7 @@ fn process_gerp(
                 // Write to output, NA for element if not contained within a conserved element
                 writeln!(
                     output_fh,
-                    "{}\t{}\t{}\t{}\tNA\tNA\tNA\tNA\tNA\tNA\tNA",
+                    "{}\t{}\t{}\t{}\t\t\t\t\t\t\t",
                     pos, neutral_rate, score, in_elem
                 ).unwrap();
             }
