@@ -492,10 +492,27 @@ fn process_gerp(
 
         // Find element that contains this position
         let mut elem: Option<&GERPElem> = None;
-        for e in elems.iter() {
+        let mut remove = Vec::new();
+        for i in 0..elems.len() {
+            let e = &elems[i];
             if e.contains(pos) {
                 elem = Some(e);
                 in_elem = true;
+                break;
+            }
+
+            // If pos is past end of element, remove it from vector
+            if pos > e.end {
+                remove.push(i);
+            }
+
+            // If pos is past end of chromosome, break
+            if pos > chrom_length {
+                break;
+            }
+
+            // If pos is before start of element, break
+            if pos < e.start {
                 break;
             }
         }
@@ -519,5 +536,11 @@ fn process_gerp(
                 ).unwrap();
             }
         }
+
+        // Remove elements that are before the current position
+        for i in remove.iter() {
+            elems.remove(*i);            
+        }
+        
     }
 }
