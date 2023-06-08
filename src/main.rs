@@ -416,7 +416,14 @@ fn process_gerp(
 
     // Read first line of MAF file
     let mut maf_parser = maf_parser(maf_fh);
-    let mut maf_block = maf_parser.next().unwrap();
+    let mut maf_block = maf_parser.next();
+
+    // If none, then we're done
+    if maf_block.is_none() {
+        return;
+    }
+
+    let mut maf_block = maf_block.unwrap();
 
     // Get length of chromosome
     let mut chrom_length = 0;
