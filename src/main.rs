@@ -99,11 +99,15 @@ fn extract_interval(input: &String, species: &String, query: &String) {
         for line in block.iter() {
             match line {
                 MafLine::SequenceLine(seqid, start, length, _strand, _src_size, _text) => {
-                    if seqid == species && chrom == seqid {
+                    let seqspecies = seqid.split(".").next().unwrap();
+                    let seqchr = seqid.split(":").next().unwrap();
+                    
+                    if seqspecies == species && seqchr == seqid {
                         if *start <= position && position <= start + length {
                             for line in block.iter() {
-                                // Output as fasta
-                                out_fh.write(line.fasta_out().as_bytes()).unwrap();
+                                if line.is_seqline() {
+                                    out_fh.write(line.fasta_out().as_bytes()).unwrap();
+                                }
                             }
                         }
                     }
@@ -172,6 +176,14 @@ impl Display for MafLine {
 }
 
 impl MafLine {
+
+    fn is_seqline(&self) -> bool {
+        match self {
+            MafLine::SequenceLine(_, _, _, _, _, _) => true,
+            _ => false,
+        }
+    }
+
     fn fasta_out(&self) -> String {
         match self {
             MafLine::Comment(x) => {
