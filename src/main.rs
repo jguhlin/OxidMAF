@@ -24,6 +24,12 @@ enum Commands {
     CountDupeRefs { input: String },
     #[command(about = "Remove Alignment Blocks with Duplicate Reference Entries")]
     RemoveDupeRefBlocks { input: String },
+    #[command(about = "Extract interval containing a given position. Prints to stdout. Currently only accepts specific locations (Chr1:1234) not yet ranges.")]
+    ExtractInterval {
+        input: String,
+        species: String,
+        query: String,
+    },
     #[command(about = "Split MAF File")]
     Split { input: String, output_path: String },
     #[command(about = "Process GERP Scores from .maf, .rates, and .elems files and export to .tsv")]
@@ -58,7 +64,59 @@ fn main() {
         } => {
             process_gerp(maf, rates, elems, output);
         }
+        Commands::ExtractInterval {
+            input,
+            species,
+            query,
+        } => {
+            extract_interval(input, species, query);
+        }
     }
+}
+
+/* #[command(about = "Extract interval containing a given position. Prints to stdout")]
+ExtractInterval {
+    input: String,
+    species: String,
+    query: String,
+}, */
+fn extract_interval(input: &String, species: &String, query: &String) {
+    // Get write buffer (so we don't flush prematurely)
+    let stdout = std::io::stdout();
+    let mut out_fh = std::io::BufWriter::new(stdout.lock());
+
+    // Open file
+    let file = std::fs::File::open(input).unwrap();
+    let mut parser = maf_parser(file);
+
+    // Parse query
+    let chrom = query.split(":").next().unwrap();
+    let position = query.split(":").nth(1).unwrap().parse::<u64>().unwrap();
+
+    // Iterate through blocks
+    // If the interval matches, print out the entire block and flush
+    for block in parser {
+        for line in block.iter() {
+            match line {
+                MafLine::SequenceLine(seqid, start, length, _strand, _src_size, _text) => {
+                    if seqid == species && chrom == seqid {
+                        if *start <= position && position <= start + length {
+                            for line in block.iter() {
+                                // Output as fasta
+                                out_fh.write(line.fasta_out().as_bytes()).unwrap();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        
+    }
+    
+    
+
+
 }
 
 // https://genome.ucsc.edu/FAQ/FAQformat.html#format5
@@ -108,6 +166,40 @@ impl Display for MafLine {
             }
             MafLine::BlankLine => {
                 write!(f, "")
+            }
+        }
+    }
+}
+
+impl MafLine {
+    fn fasta_out(&self) -> String {
+        match self {
+            MafLine::Comment(x) => {
+                panic!("Cannot convert comment to fasta")
+            }
+            MafLine::AlignmentBlockLine(x) => {
+                panic!("Cannot convert alignment block to fasta")
+            }
+            MafLine::SequenceLine(seqid, start, length, strand, src_size, text) => {
+                let mut out = String::new();
+                out.push_str(&format!(
+                    ">{}:{}-{} {} {}",
+                    seqid,
+                    start,
+                    start + length,
+                    match strand {
+                        Strand::Plus => "+",
+                        Strand::Minus => "-",
+                    },
+                    src_size,
+                ));
+                out.push_str("\n");
+                out.push_str(text);
+                out.push_str("\n");
+                return out;
+            }
+            MafLine::BlankLine => {
+                panic!("Cannot convert blank line to fasta")
             }
         }
     }
