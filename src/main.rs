@@ -99,6 +99,8 @@ fn stats(input: &String) {
 
     let mut species_counts: HashMap<String, u16, GxBuildHasher> = Default::default();
 
+    println!("Block\tLength\tSpecies\tDuplicated Species\tTotal Gaps\tGap Density");
+
     for block in parser {
         // Alignment block is name of the reference sequence, start position, and length
         block_name.clear();
