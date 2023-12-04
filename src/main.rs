@@ -1,12 +1,16 @@
+// TODO: pulp?
+
 // use bevy_app::prelude::*;
 // use bevy_app::App;
 // use bevy_ecs::prelude::*;
 // use bevy_tasks::TaskPool;
 use clap::{Parser, Subcommand};
+use gxhash::*;
 
 use std::fmt::Display;
 use std::io::BufRead;
 use std::io::{Seek, SeekFrom, Write};
+use std::collections::HashMap;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -39,6 +43,10 @@ enum Commands {
         elems: String,
         output: String,
     },
+    #[command(about = "Generate stats for each alignment block, as tab separated values")]
+    Stats {
+        maf: String,
+    }
 }
 
 fn main() {
@@ -70,9 +78,91 @@ fn main() {
             query,
         } => {
             extract_interval(input, species, query);
+        },
+        Commands::Stats {
+            maf,
+        } => {
+            stats(maf);
         }
     }
 }
+
+fn stats(input: &String) {
+    let file = std::fs::File::open(input).unwrap();
+    let mut parser = maf_parser(file);
+
+    let mut block_name = String::new();
+    let mut block_length = 0;
+
+    let mut gap_count = 0;
+    let mut seq_gap_count: HashMap<String, u64, GxBuildHasher> = Default::default();
+
+    let mut species_counts: HashMap<String, u16, GxBuildHasher> = Default::default();
+
+    for block in parser {
+        // Alignment block is name of the reference sequence, start position, and length
+        block_name.clear();
+
+        // Count number of sequences in each block, and how often they occur
+        species_counts.clear();
+
+        // Count gaps
+        seq_gap_count.clear();
+        gap_count = 0;
+
+        // Block Length
+        block_length = 0;
+    
+        for line in block.iter() {
+            match line {
+                MafLine::SequenceLine(seqid, start, length, _strand, _src_size, text) => {
+                    if block_name.is_empty() {
+                        block_name.push_str(seqid);
+                        block_name.push_str(":");
+                        block_name.push_str(&start.to_string());
+                        block_name.push_str(":");
+                        block_name.push_str(&length.to_string());
+
+                        block_length = *length;
+
+                    }
+
+                    let species = seqid.split(".").next().unwrap().to_string();
+                    // TODO: String clone
+                    let count = species_counts.entry(species.clone()).or_insert(0);
+                    *count += 1;
+
+                    // Count gaps in each line
+                    let mut gap_count_line = 0;
+                    for c in text.chars() {
+                        if c == '-' {
+                            gap_count_line += 1;
+                        }
+                    }
+
+                    // TODO: String clone
+                    let count = seq_gap_count.entry(seqid.clone()).or_insert(0);
+                    *count += gap_count_line;
+                },
+                _ => {}
+            }
+        }
+
+        // Print stats per block
+        let duplicated_species = species_counts.iter().filter(|(_, v)| **v > 1).count();
+        let total_gaps = seq_gap_count.values().sum::<u64>();
+        let average_gaps = total_gaps as f64 / seq_gap_count.len() as f64;
+
+        // Gap density
+        let gap_density = total_gaps as f64 / block_length as f64 / species_counts.len() as f64;
+        let gap_density = format!("{:.4}", gap_density);
+
+        println!("{}\t{}\t{}\t{}\t{}\t{}", block_name, block_length, species_counts.len(), duplicated_species, total_gaps, gap_density);
+        
+       
+    }
+}
+
 
 /* #[command(about = "Extract interval containing a given position. Prints to stdout")]
 ExtractInterval {
@@ -117,10 +207,6 @@ fn extract_interval(input: &String, species: &String, query: &String) {
         }
         
     }
-    
-    
-
-
 }
 
 // https://genome.ucsc.edu/FAQ/FAQformat.html#format5
