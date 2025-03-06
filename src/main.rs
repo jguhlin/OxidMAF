@@ -5,12 +5,15 @@
 // use bevy_ecs::prelude::*;
 // use bevy_tasks::TaskPool;
 use clap::{Parser, Subcommand};
-use gxhash::*;
 
-use std::fmt::Display;
 use std::io::BufRead;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 use std::collections::HashMap;
+
+mod parsers;
+mod functions;
+
+pub use parsers::*;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -37,7 +40,7 @@ enum Commands {
     #[command(about = "Split MAF File")]
     Split { input: String, output_path: String },
     #[command(about = "Process GERP Scores from .maf, .rates, and .elems files and export to .tsv")]
-    ProcessGERP {
+    ProcessGerp {
         maf: String,
         rates: String,
         elems: String,
@@ -46,7 +49,15 @@ enum Commands {
     #[command(about = "Generate stats for each alignment block, as tab separated values")]
     Stats {
         maf: String,
+    },
+    #[command(about = "Extract SNP sites from MAF, optionally return the coordinates")]
+    ExtractSnps {
+        maf: String,
+        output_prefix: String,
+        #[arg(short, long)]
+        coordinates: bool,
     }
+
 }
 
 fn main() {
@@ -64,7 +75,7 @@ fn main() {
         Commands::RemoveDupeRefBlocks { input } => {
             remove_dupe_ref_blocks(input);
         }
-        Commands::ProcessGERP {
+        Commands::ProcessGerp {
             maf,
             rates,
             elems,
@@ -83,21 +94,27 @@ fn main() {
             maf,
         } => {
             stats(maf);
+        },
+        Commands::ExtractSnps {
+            maf,
+            output_prefix,
+            coordinates,
+        } => {
+            functions::extract_snps(maf, output_prefix, *coordinates);            
         }
     }
 }
 
 fn stats(input: &String) {
     let file = std::fs::File::open(input).unwrap();
-    let mut parser = maf_parser(file);
+    let parser = maf_parser(file);
 
     let mut block_name = String::new();
-    let mut block_length = 0;
+    let mut block_length;
 
-    let mut gap_count = 0;
-    let mut seq_gap_count: HashMap<String, u64, GxBuildHasher> = Default::default();
+    let mut seq_gap_count: HashMap<String, u64> = Default::default();
 
-    let mut species_counts: HashMap<String, u16, GxBuildHasher> = Default::default();
+    let mut species_counts: HashMap<String, u16> = Default::default();
 
     println!("Block\tLength\tSpecies\tDuplicated Species\tTotal Gaps\tGap Density");
 
@@ -110,15 +127,16 @@ fn stats(input: &String) {
 
         // Count gaps
         seq_gap_count.clear();
-        gap_count = 0;
 
         // Block Length
         block_length = 0;
     
         for line in block.iter() {
             match line {
-                MafLine::SequenceLine(seqid, start, length, _strand, _src_size, text) => {
+                MafLine::SequenceLine(species, seqid, start, length, _strand, _src_size, text) => {
                     if block_name.is_empty() {
+                        block_name.push_str(species);
+                        block_name.push_str(":");
                         block_name.push_str(seqid);
                         block_name.push_str(":");
                         block_name.push_str(&start.to_string());
@@ -153,7 +171,6 @@ fn stats(input: &String) {
         // Print stats per block
         let duplicated_species = species_counts.iter().filter(|(_, v)| **v > 1).count();
         let total_gaps = seq_gap_count.values().sum::<u64>();
-        let average_gaps = total_gaps as f64 / seq_gap_count.len() as f64;
 
         // Gap density
         let gap_density = total_gaps as f64 / block_length as f64 / species_counts.len() as f64;
@@ -179,10 +196,10 @@ fn extract_interval(input: &String, species: &String, query: &String) {
 
     // Open file
     let file = std::fs::File::open(input).unwrap();
-    let mut parser = maf_parser(file);
+    let parser = maf_parser(file);
 
     // Parse query
-    let chrom = query.split(":").next().unwrap();
+    // let chrom = query.split(":").next().unwrap();
     let position = query.split(":").nth(1).unwrap().parse::<u64>().unwrap();
 
     // Iterate through blocks
@@ -190,8 +207,7 @@ fn extract_interval(input: &String, species: &String, query: &String) {
     for block in parser {
         for line in block.iter() {
             match line {
-                MafLine::SequenceLine(seqid, start, length, _strand, _src_size, _text) => {
-                    let seqspecies = seqid.split(".").next().unwrap();
+                MafLine::SequenceLine(seqspecies, seqid, start, length, _strand, _src_size, _text) => {
                     let seqchr = seqid.split(":").next().unwrap();
                     
                     if seqspecies == species && seqchr == seqid {
@@ -211,136 +227,6 @@ fn extract_interval(input: &String, species: &String, query: &String) {
     }
 }
 
-// https://genome.ucsc.edu/FAQ/FAQformat.html#format5
-enum MafReadState {
-    Comment,
-    AlignmentBlockLine,
-    SequenceLine,
-    BlankLine,
-}
-
-pub enum Strand {
-    Plus,
-    Minus,
-}
-
-// https://genome.ucsc.edu/FAQ/FAQformat.html#format5
-pub enum MafLine {
-    Comment(String),
-    AlignmentBlockLine(String),
-    SequenceLine(String, u64, u64, Strand, u64, String),
-    BlankLine,
-}
-
-impl Display for MafLine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MafLine::Comment(x) => {
-                write!(f, "#{}", x)
-            }
-            MafLine::AlignmentBlockLine(x) => {
-                write!(f, "a{}", x)
-            }
-            MafLine::SequenceLine(seqid, start, length, strand, src_size, text) => {
-                write!(
-                    f,
-                    "s {} {} {} {} {} {}",
-                    seqid,
-                    start,
-                    length,
-                    match strand {
-                        Strand::Plus => "+",
-                        Strand::Minus => "-",
-                    },
-                    src_size,
-                    text
-                )
-            }
-            MafLine::BlankLine => {
-                write!(f, "")
-            }
-        }
-    }
-}
-
-impl MafLine {
-
-    fn is_seqline(&self) -> bool {
-        match self {
-            MafLine::SequenceLine(_, _, _, _, _, _) => true,
-            _ => false,
-        }
-    }
-
-    fn fasta_out(&self) -> String {
-        match self {
-            MafLine::Comment(x) => {
-                panic!("Cannot convert comment to fasta")
-            }
-            MafLine::AlignmentBlockLine(x) => {
-                panic!("Cannot convert alignment block to fasta")
-            }
-            MafLine::SequenceLine(seqid, start, length, strand, src_size, text) => {
-                let mut out = String::new();
-                out.push_str(&format!(
-                    ">{}:{}-{} {} {}",
-                    seqid,
-                    start,
-                    start + length,
-                    match strand {
-                        Strand::Plus => "+",
-                        Strand::Minus => "-",
-                    },
-                    src_size,
-                ));
-                out.push_str("\n");
-                out.push_str(text);
-                out.push_str("\n");
-                return out;
-            }
-            MafLine::BlankLine => {
-                panic!("Cannot convert blank line to fasta")
-            }
-        }
-    }
-}
-
-fn parse_maf_line(line: &str) -> MafLine {
-    // Match on the first character
-    match line.chars().next() {
-        Some('#') => {
-            // Remove first character
-            return MafLine::Comment(line[1..].to_string());
-        }
-        Some('a') => {
-            return MafLine::AlignmentBlockLine(line[1..].to_string());
-        }
-        Some('s') => {
-            // Split by tabs and convert to:
-            // String, u64, u64, Strand, u64, String
-            let mut split = line.split_whitespace();
-            let _ = split.next(); // Remove first character
-            let seqid = split.next().unwrap().to_string();
-            let start = split.next().unwrap().parse::<u64>().unwrap();
-            let length = split.next().unwrap().parse::<u64>().unwrap();
-            let strand = match split.next().unwrap() {
-                "+" => Strand::Plus,
-                "-" => Strand::Minus,
-                _ => panic!("Invalid strand"),
-            };
-            let src_size = split.next().unwrap().parse::<u64>().unwrap();
-            let text = split.next().unwrap().to_string();
-
-            return MafLine::SequenceLine(seqid, start, length, strand, src_size, text);
-        }
-        None => {
-            return MafLine::BlankLine;
-        }
-        _ => {
-            return MafLine::BlankLine;
-        }
-    }
-}
 
 fn count_ref_gaps(input: &String) {
     // Open file
@@ -349,7 +235,7 @@ fn count_ref_gaps(input: &String) {
     let mut lines = reader.lines();
 
     let mut count = 0;
-    let mut state = MafReadState::BlankLine;
+    let mut state;
     let mut seqcount = 0;
 
     while let Some(line) = lines.next() {
@@ -392,6 +278,14 @@ fn count_ref_gaps(input: &String) {
     }
 
     println!("Count: {}", count);
+}
+
+// https://genome.ucsc.edu/FAQ/FAQformat.html#format5
+pub enum MafReadState {
+    Comment,
+    AlignmentBlockLine,
+    SequenceLine,
+    BlankLine,
 }
 
 fn count_dupe_refs(input: &String) {
@@ -457,38 +351,6 @@ fn count_dupe_refs(input: &String) {
     println!("Length: {}", seqlengths);
 }
 
-pub struct MafParser {
-    lines: std::io::Lines<std::io::BufReader<std::fs::File>>,
-    current_block: Vec<MafLine>,
-    block_start_line: Option<MafLine>,
-}
-
-impl Iterator for MafParser {
-    type Item = Vec<MafLine>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some(line) = self.lines.next() {
-            let line = line.unwrap();
-
-            // Match on the first character
-            let x = parse_maf_line(&line);
-
-            if let MafLine::BlankLine = x {
-                if self.current_block.len() > 0 {
-                    let blank = Vec::with_capacity(self.current_block.len());
-                    let block = std::mem::replace(&mut self.current_block, blank);
-                    return Some(block);
-                } else {
-                    continue;
-                }
-            } else {
-                self.current_block.push(x);
-            }
-        }
-        return None;
-    }
-}
-
 // remove_dupe_ref_blocks
 fn remove_dupe_ref_blocks(input: &String) {
     // Open file
@@ -505,10 +367,8 @@ fn remove_dupe_ref_blocks(input: &String) {
 
         for line in block.iter() {
             match line {
-                MafLine::SequenceLine(seqid, _, _, _, _, _) => {
+                MafLine::SequenceLine(speciesid, seqid, _, _, _, _, _) => {
                     seqcount += 1;
-
-                    let speciesid = seqid.split('.').next().unwrap();
 
                     if seqcount == 1 {
                         reference = speciesid.to_string();
@@ -530,18 +390,6 @@ fn remove_dupe_ref_blocks(input: &String) {
 
     // Print to STDERR
     // eprintln!("Removed {} blocks", removed_count);
-}
-
-// Create an iterator from a bufreader
-pub fn maf_parser(file: std::fs::File) -> MafParser {
-    let reader = std::io::BufReader::new(file);
-    let lines = reader.lines();
-
-    MafParser {
-        lines,
-        current_block: Vec::new(),
-        block_start_line: None,
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -622,7 +470,7 @@ fn process_gerp(
     for line in maf_block.iter() {
         match line {
             // MafLine::SequenceLine(seqid, start, length, strand, src_size, text) => {
-            MafLine::SequenceLine(_, _, _, _, length, _) => {
+            MafLine::SequenceLine(_, _, _, _, _, length, _) => {
                 chrom_length = *length;
                 break;
             }
