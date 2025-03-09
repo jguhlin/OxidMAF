@@ -159,6 +159,7 @@ impl MafLine {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Strand {
     Plus,
     Minus,
