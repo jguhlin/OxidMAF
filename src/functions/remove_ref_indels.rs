@@ -42,7 +42,7 @@ pub fn remove_ref_indels(maf: &String, output_prefix: &String) {
             }
         }
 
-
+        alignment_block.remove_ref_indels();
 
     }
 }
