@@ -42,7 +42,9 @@ pub fn remove_ref_indels(maf: &String, output_prefix: &String) {
             }
         }
 
-        alignment_block.remove_ref_indels();
+        if !alignment_block.is_empty() {
+            alignment_block.remove_ref_indels();
+        }
 
     }
 }
@@ -88,6 +90,14 @@ impl AlignmentBlock {
             }
         }
 
+    }
+
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
     }
 
 
