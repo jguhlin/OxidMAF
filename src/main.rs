@@ -56,7 +56,17 @@ enum Commands {
         output_prefix: String,
         #[arg(short, long)]
         coordinates: bool,
-    }
+
+        // / Optional: Also extract bases at the given positions from the reference. File should be a tab separated file with the following columns: Chromosome, Position
+        // / This is useful for extracting the reference base at the given position to later combine with bcftools consensus output
+        // ref_positions: Option<String>, 
+    },
+
+    #[command(about = "Remove Ref Indels")]
+    RemoveRefIndels {
+        maf: String,
+        output_prefix: String,
+    },
 
 }
 
@@ -100,7 +110,13 @@ fn main() {
             output_prefix,
             coordinates,
         } => {
-            functions::extract_snps(maf, output_prefix, *coordinates);            
+            functions::extract_snps(maf, output_prefix, *coordinates);
+        },
+        Commands::RemoveRefIndels {
+            maf,
+            output_prefix,
+        } => {
+            functions::remove_ref_indels(maf, output_prefix);
         }
     }
 }

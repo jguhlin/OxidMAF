@@ -3,7 +3,7 @@
 pub use crate::*;
 
 // todo optional pass in reference genome
-pub fn extract_snps(maf: &String, output_prefix: &String, coordinates: bool) {
+pub fn remove_ref_indels(maf: &String, output_prefix: &String) {
 
     let maf_fh = std::fs::File::open(maf).expect("Unable to open maf file");
     let maf_parser = maf_parser(maf_fh);
@@ -27,6 +27,7 @@ pub fn extract_snps(maf: &String, output_prefix: &String, coordinates: bool) {
 
                     if reference.is_none() {
                         reference = Some(species.clone());
+                        alignment_block.reference = species.clone();
                     }
 
                     // If the alignment block is empty, this is the first line of the block
@@ -49,6 +50,7 @@ pub fn extract_snps(maf: &String, output_prefix: &String, coordinates: bool) {
 // For accumulating the alignment block before processing
 #[derive(Default)]
 pub struct AlignmentBlock {
+    reference: String,
     lines: Vec<MafLine>,
     seqid: String,
     start: u64,
@@ -59,15 +61,32 @@ impl AlignmentBlock {
         self.lines.push(line);
     }
 
-    pub fn extract_snps(&self) {
-        // Go through each column in the alignment block
-        // Find where they are not all a match, and extract the SNPs
+    pub fn remove_ref_indels(&self) {
 
-        // let mut snps = Vec::new(); // Vec<Vec<char>> same order as the block
+        let mut columns_to_remove: Vec<usize> = Vec::new();
 
+        let reference = &self.lines[0];
+        if let MafLine::SequenceLine(_, _, _, _, _, _, reference_text) = reference {
+            for (i, line) in self.lines.iter().enumerate() {
+                if let MafLine::SequenceLine(_, _, _, _, _, _, text) = line {
+                    for (j, (ref_base, base)) in reference_text.chars().zip(text.chars()).enumerate() {
+                        if ref_base == '-' || base == '-' {
+                            columns_to_remove.push(j);
+                        }
+                    }
+                }
+            }
+        } else {
+            unreachable!();
+        }
 
-
-
+        // Remove the columns from the alignment block
+        for line in self.lines.iter() {
+            if let MafLine::SequenceLine(species, seqid, start, length, strand, src_size, text) = line {
+                let new_text: String = text.chars().enumerate().filter(|(i, _)| !columns_to_remove.contains(i)).map(|(_, c)| c).collect();
+                println!("{}", new_text);
+            }
+        }
 
     }
 
