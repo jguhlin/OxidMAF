@@ -4,7 +4,6 @@ pub use crate::*;
 
 // todo optional pass in reference genome
 pub fn extract_snps(maf: &String, output_prefix: &String, coordinates: bool) {
-
     let maf_fh = std::fs::File::open(maf).expect("Unable to open maf file");
     let maf_parser = maf_parser(maf_fh);
 
@@ -24,14 +23,16 @@ pub fn extract_snps(maf: &String, output_prefix: &String, coordinates: bool) {
                 MafLine::AlignmentBlockLine(_) => (),
 
                 MafLine::SequenceLine(species, seqid, start, length, strand, src_size, text) => {
-
                     if reference.is_none() {
                         reference = Some(species.clone());
                     }
 
                     // If the alignment block is empty, this is the first line of the block
                     if alignment_block.lines.is_empty() {
-                        assert!(species == reference.as_ref().unwrap(), "First line of alignment block is not the reference genome");
+                        assert!(
+                            species == reference.as_ref().unwrap(),
+                            "First line of alignment block is not the reference genome"
+                        );
                         alignment_block.seqid = seqid.clone();
                         alignment_block.start = *start;
                     }
@@ -40,36 +41,5 @@ pub fn extract_snps(maf: &String, output_prefix: &String, coordinates: bool) {
                 }
             }
         }
-
-
-
     }
-}
-
-// For accumulating the alignment block before processing
-#[derive(Default)]
-pub struct AlignmentBlock {
-    lines: Vec<MafLine>,
-    seqid: String,
-    start: u64,
-}
-
-impl AlignmentBlock {
-    pub fn add_line(&mut self, line: MafLine) {
-        self.lines.push(line);
-    }
-
-    pub fn extract_snps(&self) {
-        // Go through each column in the alignment block
-        // Find where they are not all a match, and extract the SNPs
-
-        // let mut snps = Vec::new(); // Vec<Vec<char>> same order as the block
-
-
-
-
-
-    }
-
-
 }

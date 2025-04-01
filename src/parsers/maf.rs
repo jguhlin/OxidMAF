@@ -45,6 +45,57 @@ impl Iterator for MafParser {
     }
 }
 
+impl MafParser {
+    // Iterate over the alignment blocks
+    pub fn alignment_blocks(&mut self) -> AlignmentBlockIterator {
+        AlignmentBlockIterator { parser: self }
+    }
+}
+
+pub struct AlignmentBlockIterator<'a> {
+    parser: &'a mut MafParser,
+}
+
+impl<'a> Iterator for AlignmentBlockIterator<'a> {
+    type Item = AlignmentBlock;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut block = AlignmentBlock::default();
+        let mut block_is_alignment = false;
+
+        while let Some(line) = self.parser.lines.next() {
+            let line = line.unwrap();
+
+            // Match on the first character
+            let x = parse_maf_line(&line);
+
+            match &x {
+                MafLine::AlignmentBlockLine(_) => {
+                    if block.lines.len() > 0 && block_is_alignment {
+                        return Some(block);
+                    }
+                }
+                MafLine::SequenceLine(species, seqid, start, length, strand, src_size, text) => {
+                    block.species.push(species.clone());
+                    block_is_alignment = true;
+                    if block.lines.len() == 0 {
+                        block.seqid = seqid.clone();
+                        block.start = *start;
+                        block.len = *length;
+                    }
+                    block.lines.push(x);
+                }
+                _ => (), // Do nothing for comments and blank lines
+            }
+
+            if !block_is_alignment {
+                continue;
+            }
+        }
+        return None;
+    }
+}
+
 // https://genome.ucsc.edu/FAQ/FAQformat.html#format5
 #[derive(Clone)]
 pub enum MafLine {
@@ -118,7 +169,6 @@ impl Debug for MafLine {
 }
 
 impl MafLine {
-
     pub fn is_seqline(&self) -> bool {
         match self {
             MafLine::SequenceLine(_, _, _, _, _, _, _) => true,
@@ -165,6 +215,14 @@ pub enum Strand {
     Minus,
 }
 
+impl Display for Strand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Strand::Plus => write!(f, "+"),
+            Strand::Minus => write!(f, "-"),
+        }
+    }
+}
 
 fn parse_maf_line(line: &str) -> MafLine {
     // Match on the first character
@@ -206,4 +264,45 @@ fn parse_maf_line(line: &str) -> MafLine {
             return MafLine::BlankLine;
         }
     }
+}
+
+// For accumulating the alignment block before processing
+#[derive(Default)]
+pub struct AlignmentBlock {
+    pub species: Vec<String>,
+    pub lines: Vec<MafLine>,
+    pub seqid: String,
+    pub start: u64,
+    pub len: u64,
+}
+
+impl AlignmentBlock {
+    pub fn add_line(&mut self, line: MafLine) {
+        self.lines.push(line);
+    }
+
+    pub fn contains_pos(&self, chrom: &String, pos: u64) -> ContainsResult {
+        if self.seqid != *chrom {
+            return ContainsResult::WrongChrom;
+        }
+
+        let end = self.start + self.len;
+        if pos >= self.start && pos <= end {
+            return ContainsResult::True;
+        } else if pos < self.start {
+            return ContainsResult::Before;
+        } else {
+            return ContainsResult::After;
+        }
+    }
+
+    pub fn extract_snps(&self) {}
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum ContainsResult {
+    True,
+    Before,
+    After,
+    WrongChrom,
 }

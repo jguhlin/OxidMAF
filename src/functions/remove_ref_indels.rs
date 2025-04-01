@@ -4,7 +4,6 @@ pub use crate::*;
 
 // todo optional pass in reference genome
 pub fn remove_ref_indels(maf: &String, output_prefix: &String) {
-
     let maf_fh = std::fs::File::open(maf).expect("Unable to open maf file");
     let maf_parser = maf_parser(maf_fh);
 
@@ -24,7 +23,6 @@ pub fn remove_ref_indels(maf: &String, output_prefix: &String) {
                 MafLine::AlignmentBlockLine(_) => (),
 
                 MafLine::SequenceLine(species, seqid, start, length, strand, src_size, text) => {
-
                     if reference.is_none() {
                         reference = Some(species.clone());
                         alignment_block.reference = species.clone();
@@ -32,7 +30,10 @@ pub fn remove_ref_indels(maf: &String, output_prefix: &String) {
 
                     // If the alignment block is empty, this is the first line of the block
                     if alignment_block.lines.is_empty() {
-                        assert!(species == reference.as_ref().unwrap(), "First line of alignment block is not the reference genome");
+                        assert!(
+                            species == reference.as_ref().unwrap(),
+                            "First line of alignment block is not the reference genome"
+                        );
                         alignment_block.seqid = seqid.clone();
                         alignment_block.start = *start;
                     }
@@ -45,7 +46,6 @@ pub fn remove_ref_indels(maf: &String, output_prefix: &String) {
         if !alignment_block.is_empty() {
             alignment_block.remove_ref_indels();
         }
-
     }
 }
 
@@ -64,14 +64,15 @@ impl AlignmentBlock {
     }
 
     pub fn remove_ref_indels(&self) {
-
         let mut columns_to_remove: Vec<usize> = Vec::new();
 
         let reference = &self.lines[0];
         if let MafLine::SequenceLine(_, _, _, _, _, _, reference_text) = reference {
             for (i, line) in self.lines.iter().enumerate() {
                 if let MafLine::SequenceLine(_, _, _, _, _, _, text) = line {
-                    for (j, (ref_base, base)) in reference_text.chars().zip(text.chars()).enumerate() {
+                    for (j, (ref_base, base)) in
+                        reference_text.chars().zip(text.chars()).enumerate()
+                    {
                         if ref_base == '-' || base == '-' {
                             columns_to_remove.push(j);
                         }
@@ -84,12 +85,18 @@ impl AlignmentBlock {
 
         // Remove the columns from the alignment block
         for line in self.lines.iter() {
-            if let MafLine::SequenceLine(species, seqid, start, length, strand, src_size, text) = line {
-                let new_text: String = text.chars().enumerate().filter(|(i, _)| !columns_to_remove.contains(i)).map(|(_, c)| c).collect();
+            if let MafLine::SequenceLine(species, seqid, start, length, strand, src_size, text) =
+                line
+            {
+                let new_text: String = text
+                    .chars()
+                    .enumerate()
+                    .filter(|(i, _)| !columns_to_remove.contains(i))
+                    .map(|(_, c)| c)
+                    .collect();
                 println!("{}", new_text);
             }
         }
-
     }
 
     pub fn len(&self) -> usize {
@@ -99,6 +106,4 @@ impl AlignmentBlock {
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
-
-
 }

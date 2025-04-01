@@ -6,12 +6,12 @@
 // use bevy_tasks::TaskPool;
 use clap::{Parser, Subcommand};
 
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::io::Write;
-use std::collections::HashMap;
 
-mod parsers;
 mod functions;
+mod parsers;
 
 pub use parsers::*;
 
@@ -31,7 +31,9 @@ enum Commands {
     CountDupeRefs { input: String },
     #[command(about = "Remove Alignment Blocks with Duplicate Reference Entries")]
     RemoveDupeRefBlocks { input: String },
-    #[command(about = "Extract interval containing a given position. Prints to stdout. Currently only accepts specific locations (Chr1:1234) not yet ranges.")]
+    #[command(
+        about = "Extract interval containing a given position. Prints to stdout. Currently only accepts specific locations (Chr1:1234) not yet ranges."
+    )]
     ExtractInterval {
         input: String,
         species: String,
@@ -39,7 +41,9 @@ enum Commands {
     },
     #[command(about = "Split MAF File")]
     Split { input: String, output_path: String },
-    #[command(about = "Process GERP Scores from .maf, .rates, and .elems files and export to .tsv")]
+    #[command(
+        about = "Process GERP Scores from .maf, .rates, and .elems files and export to .tsv"
+    )]
     ProcessGerp {
         maf: String,
         rates: String,
@@ -47,27 +51,30 @@ enum Commands {
         output: String,
     },
     #[command(about = "Generate stats for each alignment block, as tab separated values")]
-    Stats {
-        maf: String,
-    },
+    Stats { maf: String },
     #[command(about = "Extract SNP sites from MAF, optionally return the coordinates")]
     ExtractSnps {
         maf: String,
         output_prefix: String,
         #[arg(short, long)]
         coordinates: bool,
-
         // / Optional: Also extract bases at the given positions from the reference. File should be a tab separated file with the following columns: Chromosome, Position
         // / This is useful for extracting the reference base at the given position to later combine with bcftools consensus output
-        // ref_positions: Option<String>, 
+        // ref_positions: Option<String>,
     },
 
     #[command(about = "Remove Ref Indels")]
-    RemoveRefIndels {
-        maf: String,
-        output_prefix: String,
-    },
+    RemoveRefIndels { maf: String, output_prefix: String },
 
+    #[command(
+        about = "Annotate VCF with Ancestral Allele (AA=..) using MAF file from ProgressiveCactus"
+    )]
+    AnnotateAncestralAllele {
+        maf: String,
+        vcf: String,
+        ancestors: String,
+        output: String,
+    },
 }
 
 fn main() {
@@ -99,23 +106,26 @@ fn main() {
             query,
         } => {
             extract_interval(input, species, query);
-        },
-        Commands::Stats {
-            maf,
-        } => {
+        }
+        Commands::Stats { maf } => {
             stats(maf);
-        },
+        }
         Commands::ExtractSnps {
             maf,
             output_prefix,
             coordinates,
         } => {
             functions::extract_snps(maf, output_prefix, *coordinates);
-        },
-        Commands::RemoveRefIndels {
+        }
+        Commands::AnnotateAncestralAllele {
             maf,
-            output_prefix,
+            vcf,
+            ancestors,
+            output,
         } => {
+            functions::annotate_ancestral_allele(maf, vcf, ancestors, output);
+        }
+        Commands::RemoveRefIndels { maf, output_prefix } => {
             functions::remove_ref_indels(maf, output_prefix);
         }
     }
@@ -146,7 +156,7 @@ fn stats(input: &String) {
 
         // Block Length
         block_length = 0;
-    
+
         for line in block.iter() {
             match line {
                 MafLine::SequenceLine(species, seqid, start, length, _strand, _src_size, text) => {
@@ -160,7 +170,6 @@ fn stats(input: &String) {
                         block_name.push_str(&length.to_string());
 
                         block_length = *length;
-
                     }
 
                     let species = seqid.split(".").next().unwrap().to_string();
@@ -179,7 +188,7 @@ fn stats(input: &String) {
                     // TODO: String clone
                     let count = seq_gap_count.entry(seqid.clone()).or_insert(0);
                     *count += gap_count_line;
-                },
+                }
                 _ => {}
             }
         }
@@ -192,12 +201,17 @@ fn stats(input: &String) {
         let gap_density = total_gaps as f64 / block_length as f64 / species_counts.len() as f64;
         let gap_density = format!("{:.4}", gap_density);
 
-        println!("{}\t{}\t{}\t{}\t{}\t{}", block_name, block_length, species_counts.len(), duplicated_species, total_gaps, gap_density);
-        
-       
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            block_name,
+            block_length,
+            species_counts.len(),
+            duplicated_species,
+            total_gaps,
+            gap_density
+        );
     }
 }
-
 
 /* #[command(about = "Extract interval containing a given position. Prints to stdout")]
 ExtractInterval {
@@ -223,9 +237,17 @@ fn extract_interval(input: &String, species: &String, query: &String) {
     for block in parser {
         for line in block.iter() {
             match line {
-                MafLine::SequenceLine(seqspecies, seqid, start, length, _strand, _src_size, _text) => {
+                MafLine::SequenceLine(
+                    seqspecies,
+                    seqid,
+                    start,
+                    length,
+                    _strand,
+                    _src_size,
+                    _text,
+                ) => {
                     let seqchr = seqid.split(":").next().unwrap();
-                    
+
                     if seqspecies == species && seqchr == seqid {
                         if *start <= position && position <= start + length {
                             for line in block.iter() {
@@ -239,10 +261,8 @@ fn extract_interval(input: &String, species: &String, query: &String) {
                 _ => {}
             }
         }
-        
     }
 }
-
 
 fn count_ref_gaps(input: &String) {
     // Open file
@@ -455,12 +475,7 @@ impl GERPElem {
 }
 
 // process_gerp(maf, rates, elems, output);
-fn process_gerp(
-    maf: &String,
-    rates: &String,
-    elems: &String,
-    output: &String,
-) {
+fn process_gerp(maf: &String, rates: &String, elems: &String, output: &String) {
     let maf_fh = std::fs::File::open(maf).expect("Unable to open maf file");
     let rates_fh = std::fs::File::open(rates).expect("Unable to open rates file");
     let elems_fh = std::fs::File::open(elems).expect("Unable to open elems file");
@@ -503,7 +518,10 @@ fn process_gerp(
     }
 
     // GERP Sanity Check
-    println!("Rates Length: {} Chrom Length: {}", rates_count, chrom_length);
+    println!(
+        "Rates Length: {} Chrom Length: {}",
+        rates_count, chrom_length
+    );
     assert!(rates_count <= chrom_length, "Rates file length does not match chromosome length - This program expect GERP scores to be split by chromosome");
 
     // Rewind file
@@ -523,8 +541,12 @@ fn process_gerp(
             let score = split[3].parse::<f32>().unwrap();
             let pval = split[4].parse::<f64>().unwrap();
             let expected = split[5].parse::<f64>().unwrap();
-            let observed = split[6].parse::<f64>().expect(format!("Unable to parse observed value: {}", split[6]).as_str());
-            let length = split[7].parse::<f64>().expect(format!("Unable to parse length value: {}", split[7]).as_str());
+            let observed = split[6]
+                .parse::<f64>()
+                .expect(format!("Unable to parse observed value: {}", split[6]).as_str());
+            let length = split[7]
+                .parse::<f64>()
+                .expect(format!("Unable to parse length value: {}", split[7]).as_str());
 
             GERPElem::new(region, start, end, score, pval, expected, observed, length)
         })
@@ -545,7 +567,9 @@ fn process_gerp(
         let line = line.unwrap();
         let split: Vec<&str> = line.split_whitespace().collect();
 
-        let neutral_rate = split[0].parse::<f64>().expect(format!("Unable to parse neutral rate: {}", split[0]).as_str());
+        let neutral_rate = split[0]
+            .parse::<f64>()
+            .expect(format!("Unable to parse neutral rate: {}", split[0]).as_str());
         let score = split[1].parse::<f32>().unwrap();
 
         // If both are zero skip
@@ -586,7 +610,17 @@ fn process_gerp(
                 writeln!(
                     output_fh,
                     "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                    pos, neutral_rate, score, in_elem, e.start, e.end, e.score, e.pval, e.expected, e.observed, e.length
+                    pos,
+                    neutral_rate,
+                    score,
+                    in_elem,
+                    e.start,
+                    e.end,
+                    e.score,
+                    e.pval,
+                    e.expected,
+                    e.observed,
+                    e.length
                 )
                 .unwrap();
             }
@@ -596,14 +630,14 @@ fn process_gerp(
                     output_fh,
                     "{}\t{}\t{}\t{}\t\t\t\t\t\t\t",
                     pos, neutral_rate, score, in_elem
-                ).unwrap();
+                )
+                .unwrap();
             }
         }
 
         // Remove elements that are before the current position
         for i in remove.iter() {
-            elems.remove(*i);            
+            elems.remove(*i);
         }
-        
     }
 }
