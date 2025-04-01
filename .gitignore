@@ -20,3 +20,8 @@ Cargo.lock
 
 *.maf
 *.stats
+*.gz
+*.csi
+*.tai
+*.tsv
+*.zst
