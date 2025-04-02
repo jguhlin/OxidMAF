@@ -59,6 +59,7 @@ pub fn annotate_ancestral_allele(taf: &String, vcf: &String, ancestors: &String,
 
         // If we don't have a current column, skip the record.
         if column.is_none() {
+            println!("No column found for contig {}", record.chrom);
             continue;
         }
         let mut col = column.clone().unwrap();
