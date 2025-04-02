@@ -1,13 +1,94 @@
-// This is like 95% chatgpt
-
-use super::ContainsResult;
+use flate2::bufread::GzDecoder;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Error as IoError, Lines};
+use std::io::{BufRead, BufReader, Cursor, Error as IoError, Lines, Read, Seek, SeekFrom};
 
-// ---
-// The header and other types remain the same
+use super::ContainsResult;
+
+/// Represents one index entry for a block.
+#[derive(Debug)]
+pub struct TaiEntry {
+    /// The uncompressed block start coordinate (second column)
+    block_start: u64,
+    /// The file offset (third column). For bgzipped files, this is the compressed offset.
+    offset: u64,
+}
+
+/// The TAI index, mapping a contig name to a vector of index entries.
+#[derive(Debug)]
+pub struct TaiIndex {
+    entries: HashMap<String, Vec<TaiEntry>>,
+}
+
+impl TaiIndex {
+    /// Load a TAI index from the given file path.
+    ///
+    /// The file is expected to be tab-delimited with three columns.
+    /// The first column holds the contig name or "*" to indicate the same contig as the previous line.
+    /// The second column is the block start (uncompressed coordinate).
+    /// The third column is the file offset (for bgzipped files, the compressed offset).
+    pub fn from_file(path: &str) -> Result<Self, std::io::Error> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let mut entries: HashMap<String, Vec<TaiEntry>> = HashMap::new();
+        let mut current_contig = String::new();
+
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() < 3 {
+                continue;
+            }
+
+            // Update the current contig if the first field is not "*"
+            if fields[0] != "*" {
+                // Split after the first dot to get the contig name.
+                let parts: Vec<&str> = fields[0].splitn(2, '.').collect();
+                if parts.len() > 1 {
+                    current_contig = parts[1].to_string();
+                } else {
+                    current_contig = fields[0].to_string();
+                }
+            }
+
+            // Parse the block start and offset
+            let block_start = fields[1].parse::<u64>().unwrap_or(0);
+            let offset = fields[2].parse::<u64>().unwrap_or(0);
+            let entry = TaiEntry {
+                block_start,
+                offset,
+            };
+
+            entries
+                .entry(current_contig.clone())
+                .or_insert_with(Vec::new)
+                .push(entry);
+        }
+        Ok(TaiIndex { entries })
+    }
+
+    /// Given a contig and a target uncompressed coordinate, find the block entry with the highest block_start that is <= target.
+    /// Returns a tuple: (block_start, file_offset).
+    pub fn get_seek_info(&self, contig: &str, pos: u64) -> Option<(u64, u64)> {
+        self.entries.get(contig).and_then(|entries| {
+            // Since entries are inserted in order, we can iterate until block_start exceeds the target.
+            let mut candidate = None;
+            for entry in entries {
+                if entry.block_start <= pos {
+                    candidate = Some(entry);
+                } else {
+                    break;
+                }
+            }
+            candidate.map(|e| (e.block_start, e.offset))
+        })
+    }
+}
 
 #[derive(Debug)]
 pub struct TafHeader {
@@ -63,26 +144,36 @@ pub enum Strand {
 // ---
 // Now, the parser is generic over any type that implements BufRead.
 
-pub struct TafParser<R: BufRead> {
+pub struct TafParser {
     pub header: TafHeader,
     pub run_length_encode: bool,
-    lines: Lines<R>,
+    inner: BufReader<File>,
+    inner_buf: BufReader<Cursor<Vec<u8>>>,
+    line: String,
 }
 
-impl<R: BufRead> TafParser<R> {
+impl TafParser {
     /// Create a new parser from any reader that implements BufRead.
-    pub fn new(reader: R) -> Result<Self, IoError> {
-        let mut lines = reader.lines();
+    pub fn from_file(path: &str) -> Result<Self, IoError> {
+        let reader = File::open(path).unwrap();
+        let mut reader = BufReader::new(reader);
+
+        let mut inner_buf = Vec::new();
+        // Decode the first Gz Block
+        let mut gz_decoder = GzDecoder::new(reader);
+        gz_decoder
+            .read_to_end(&mut inner_buf)
+            .map_err(|e| IoError::new(std::io::ErrorKind::Other, e))?;
+
+        // Create a new reader from the decompressed data
+        let mut reader = gz_decoder.into_inner();
+
+        let mut inner_buf = BufReader::new(std::io::Cursor::new(inner_buf));
+
         // The header must be the first line.
-        let header_line = match lines.next() {
-            Some(line) => line?,
-            None => {
-                return Err(IoError::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Empty file",
-                ))
-            }
-        };
+        // Get the first line
+        let mut header_line = String::new();
+        inner_buf.read_line(&mut header_line)?;
         if !header_line.starts_with("#taf") {
             return Err(IoError::new(
                 std::io::ErrorKind::InvalidData,
@@ -97,28 +188,63 @@ impl<R: BufRead> TafParser<R> {
         Ok(TafParser {
             header,
             run_length_encode,
-            lines,
+            inner: reader,
+            line: String::new(),
+            inner_buf,
         })
+    }
+
+    pub fn seek_to(&mut self, pos: u64, block_offset: u64) {
+        // Seek to the specified position in the file.
+        self.inner.seek(SeekFrom::Start(pos)).unwrap();
+
+        // Decode the next block
+        let mut gz_decoder = GzDecoder::new(&mut self.inner);
+        let mut inner_buf = Vec::new();
+        gz_decoder
+            .read_to_end(&mut inner_buf)
+            .expect("Failed to read gzipped data");
+        // Create a new reader from the decompressed data
+        self.inner_buf = BufReader::new(Cursor::new(inner_buf));
+        self.inner_buf
+            .seek(SeekFrom::Start(block_offset))
+            .expect("Failed to seek to block offset");
+    }
+
+    fn read_next_block(&mut self) -> Result<(), IoError> {
+        // Read the next block of data from the inner buffer.
+        let mut gz_decoder = GzDecoder::new(&mut self.inner);
+        let mut inner_buf = Vec::new();
+        gz_decoder
+            .read_to_end(&mut inner_buf)
+            .map_err(|e| IoError::new(std::io::ErrorKind::Other, e))?;
+        // Create a new reader from the decompressed data
+        self.inner_buf = BufReader::new(Cursor::new(inner_buf));
+        Ok(())
     }
 }
 
-impl<R: BufRead> Iterator for TafParser<R> {
+impl Iterator for TafParser {
     type Item = Result<TafColumn, String>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(line_result) = self.lines.next() {
-            match line_result {
-                Ok(line) => {
-                    let line = line.trim();
-                    if line.is_empty() || (line.starts_with('#') && !line.starts_with("#taf")) {
-                        continue;
-                    }
-                    return Some(parse_taf_column(line, self.run_length_encode));
+        // Read lines until we find a valid TAF column or EOF.
+        loop {
+            self.line.clear();
+            if self.inner_buf.read_line(&mut self.line).is_err() {
+                // Try to read the next block
+                match self.read_next_block() {
+                    Ok(_) => continue,
+                    Err(e) => return Some(Err(e.to_string())),
                 }
-                Err(e) => return Some(Err(e.to_string())),
             }
+
+            let line = self.line.trim();
+            if line.is_empty() || (line.starts_with('#') && !line.starts_with("#taf")) {
+                continue;
+            }
+            return Some(parse_taf_column(line, self.run_length_encode));
         }
-        None
     }
 }
 
@@ -339,8 +465,8 @@ fn parse_tags(tokens: &[&str]) -> HashMap<String, String> {
 
 /// An alignment iterator that wraps the TafParser and maintains two mappings:
 /// one for species names and one for current coordinates (updated by coordinate ops).
-pub struct TafAlignmentIterator<R: BufRead> {
-    parser: TafParser<R>,
+pub struct TafAlignmentIterator<'taf> {
+    parser: &'taf mut TafParser,
     /// Mapping from row index to species name (if known).
     species_map: Vec<Option<String>>,
     /// Mapping from row index to the current coordinate for that row.
@@ -361,9 +487,9 @@ pub struct TafAlignmentColumn {
     pub col_index: usize,
 }
 
-impl<R: BufRead> TafAlignmentIterator<R> {
+impl<'taf> TafAlignmentIterator<'taf> {
     /// Create a new alignment iterator from the given parser.
-    pub fn new(parser: TafParser<R>) -> Self {
+    pub fn new(parser: &'taf mut TafParser) -> Self {
         TafAlignmentIterator {
             parser,
             species_map: Vec::new(),
@@ -373,7 +499,7 @@ impl<R: BufRead> TafAlignmentIterator<R> {
     }
 }
 
-impl<R: BufRead> Iterator for TafAlignmentIterator<R> {
+impl<'taf> Iterator for TafAlignmentIterator<'taf> {
     type Item = Result<TafAlignmentColumn, String>;
 
     fn next(&mut self) -> Option<Self::Item> {
