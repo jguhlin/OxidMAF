@@ -25,7 +25,6 @@ pub fn annotate_ancestral_allele(taf: &String, vcf: &String, ancestors: &String,
 
     // Load the TAF index from the .tai file (assumed to be at taf+".tai")
     let taf_index_path = format!("{}.tai", taf);
-    let taf_index = TafIndex::load(&taf_index_path).expect("Failed to load TAF index");
 
     // Keep track of the current chromosome and alignment iterator.
     let mut current_chrom = String::new();
@@ -46,6 +45,7 @@ pub fn annotate_ancestral_allele(taf: &String, vcf: &String, ancestors: &String,
     for record in vcf_reader.records() {
         // When the record's chromosome changes, seek to that contig.
         if current_chrom != record.chrom {
+            println!("Switching to contig {} from {}", record.chrom, current_chrom);
             current_chrom = record.chrom.clone();
             // Use the TAF index to get an iterator for this contig.
             let seek_info = taf_index.get_seek_info(&current_chrom, 1).unwrap();
