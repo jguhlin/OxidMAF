@@ -1,6 +1,23 @@
-use std::io::Write;
-
+use std::io::{BufReader, Seek, SeekFrom, Write};
+use std::fs::File;
 use crate::parsers::*;
+
+/// Helper function that reopens the TAF file, seeks to a given offset, and returns a new alignment iterator.
+/// (This approach avoids lifetime issues with holding a mutable borrow on a single file.)
+fn create_alignment_iterator_from_path(
+    taf_path: &str,
+    offset: u64,
+) -> TafAlignmentIterator<BufReader<File>> {
+    let mut file = File::open(taf_path).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    let buf_reader = BufReader::new(file);
+    let parser = TafParser::new(buf_reader).unwrap();
+    TafAlignmentIterator::new(parser)
+}
+
+
+// This function now expects that a corresponding TAF index (.tai) file exists.
+// It also assumes that the TAF file is uncompressed (or that seeking is supported).
 pub fn annotate_ancestral_allele(taf: &String, vcf: &String, ancestors: &String, output: &String) {
     // Assert ancestors are a list of numbers, separated by commas.
     assert!(
@@ -10,93 +27,110 @@ pub fn annotate_ancestral_allele(taf: &String, vcf: &String, ancestors: &String,
 
     let mut out_aa = std::fs::File::create(format!("{}.tsv", output)).unwrap();
     let mut out_aa = std::io::BufWriter::new(out_aa);
-
-    // Add header
-    // #CHROM  POS     AA
+    // Write header
     out_aa.write_all(b"#CHROM\tPOS\tAA\n").unwrap();
 
     let mut out_remove = std::fs::File::create(format!("{}_remove.tsv", output)).unwrap();
     let mut out_remove = std::io::BufWriter::new(out_remove);
 
-    let ancestors: Vec<usize> = ancestors.split(',').map(|x| x.parse().unwrap()).collect();
+    let ancestors: Vec<usize> = ancestors
+        .split(',')
+        .map(|x| x.parse().unwrap())
+        .collect();
 
     let mut vcf_reader = VcfParser::from_file(vcf); // Assume you have a VCF parser.
-    let taf_file = std::fs::File::open(taf).unwrap();
-    let taf_file = flate2::read::MultiGzDecoder::new(taf_file);
-    let buf_reader = std::io::BufReader::new(taf_file);
 
-    let mut parser = TafParser::new(buf_reader).unwrap();
-    let mut align_iter = TafAlignmentIterator::new(&mut parser);
+    // Load the TAF index from the .tai file (assumed to be at taf+".tai")
+    let taf_index_path = format!("{}.tai", taf);
+    let taf_index = TafIndex::load(&taf_index_path).expect("Failed to load TAF index");
 
+    // Helper: Given a seek offset into the TAF file, reinitialize a new alignment iterator.
+    fn create_alignment_iterator<R>(mut reader: R, offset: u64) -> TafAlignmentIterator<R>
+    where
+        R: std::io::BufRead + Seek,
+    {
+        reader.seek(SeekFrom::Start(offset)).unwrap();
+        // Create a new parser; note that the header should appear at the offset.
+        let parser = TafParser::new(reader).unwrap();
+        TafAlignmentIterator::new(parser)
+    }
+
+    // Keep track of the current chromosome and alignment iterator.
+    let mut current_chrom = String::new();
+    // We use an Option so we can reinitialize when the chromosome changes.
+    let mut align_iter: Option<TafAlignmentIterator<BufReader<std::fs::File>>> = None;
+    // Cache the current alignment column.
+    let mut column: Option<TafAlignmentColumn> = None;
+
+    // Statistics counters.
     let mut ancestral_matches = 0;
     let mut ancestral_not_found = 0;
     let mut ancestral_missing = 0;
     let mut ancestral_by_majority = 0;
 
-    // Get the first alignment column.
-    let mut column = align_iter.next().unwrap().unwrap();
-
     for record in vcf_reader.records() {
-        // First, ensure the current column is for the correct chromosome.
-        if column.ref_coord(&record.chrom).is_none() {
-            println!(
-                "Record: {}:{} ({}), Chrom: {}",
-                record.chrom, record.pos, record.id, record.chrom
-            );
-            println!(
-                "Alignment column reference: {:?}",
-                column.ref_coord(&record.chrom)
-            );
-            println!("Ancestral matches: {}", ancestral_matches);
-            println!("Ancestral not found: {}", ancestral_not_found);
-            println!("Ancestral missing: {}", ancestral_missing);
-            println!("Ancestral by majority: {}", ancestral_by_majority);
-
-            // Print fraction
-            let total = ancestral_matches + ancestral_not_found;
-            let fraction = ancestral_matches as f64 / total as f64;
-            println!("Fraction ancestral matches: {}", fraction);
-
-            // TODO Temp while only working on one chr
-            break;
+        // When the record's chromosome changes, seek to that contig.
+        if current_chrom != record.chrom {
+            current_chrom = record.chrom.clone();
+            // Use the TAF index to get an iterator for this contig.
+            if let Some(mut contig_iter) = taf_index.iter_contig(&current_chrom) {
+                // The first entry for the contig gives the file offset.
+                let start_offset = contig_iter.next().unwrap().offset;
+                let taf_file = std::fs::File::open(taf).unwrap();
+                let buf_reader = BufReader::new(taf_file);
+                align_iter = Some(create_alignment_iterator(buf_reader, start_offset));
+                // Fetch the first alignment column for this chromosome.
+                column = align_iter
+                    .as_mut()
+                    .and_then(|it| it.next().transpose().ok().flatten());
+            } else {
+                // No alignment found for this chromosome; skip records.
+                eprintln!("No TAF alignment found for chromosome {}", record.chrom);
+                continue;
+            }
         }
 
-        // Now, loop until the reference coordinate in row 0 matches the SNP position.
-        // (Assume row 0 is the reference.)
-        while !column.ref_matches_pos(0, record.pos) {
-            // Advance to the next column.
-            column = align_iter.next().unwrap().unwrap();
-            // Also check that this new column is on the correct chromosome.
-            if column.ref_coord(&record.chrom).is_none() {
-                println!(
-                    "Record: {}:{} ({}), Chrom: {}",
-                    record.chrom, record.pos, record.id, record.chrom
-                );
-                println!(
-                    "Alignment column reference: {:?}",
-                    column.ref_coord(&record.chrom)
-                );
-                println!("Ancestral matches: {}", ancestral_matches);
-                println!("Ancestral not found: {}", ancestral_not_found);
-                println!("Ancestral missing: {}", ancestral_missing);
-                println!("Ancestral by majority: {}", ancestral_by_majority);
+        // If we don't have a current column, skip the record.
+        if column.is_none() {
+            continue;
+        }
+        let mut col = column.clone().unwrap();
 
-                // Print fraction
-                let total = ancestral_matches + ancestral_not_found;
-                let fraction = ancestral_matches as f64 / total as f64;
-                println!("Fraction ancestral matches: {}", fraction);
-
-                // TODO Temp while only working on one chr
+        // Advance alignment columns until the reference coordinate (row 0) matches the VCF position.
+        while !col.ref_matches_pos(0, record.pos) {
+            if let Some(next_result) = align_iter.as_mut().unwrap().next() {
+                match next_result {
+                    Ok(next_col) => {
+                        // If the new column isn’t for the current chromosome,
+                        // then we've reached the end of this contig's block.
+                        if next_col.ref_coord(&record.chrom).is_none() {
+                            col = next_col;
+                            break;
+                        }
+                        col = next_col;
+                    }
+                    Err(e) => {
+                        eprintln!("Error reading alignment column: {}", e);
+                        break;
+                    }
+                }
+            } else {
+                // End of alignment columns for this contig.
+                col = col;
                 break;
             }
         }
 
-        // At this point, column.ref_matches_pos(0, record.pos) is true.
-        // Try to extract the SNP for an ancestor.
+        // If the alignment column still does not match the SNP position, skip this record.
+        if !col.ref_matches_pos(0, record.pos) {
+            continue;
+        }
+
+        // Try to extract an ancestral allele from one of the specified ancestors.
         let mut ancestral_allele = None;
         for anc in ancestors.iter() {
             let species = format!("Anc{}", anc);
-            if let Some((_, allele)) = column.allele_for_species(&species) {
+            if let Some((_, allele)) = col.allele_for_species(&species) {
                 let allele = allele.to_ascii_uppercase();
                 if allele != '-' && allele != 'N' && allele != '*' {
                     if allele == record.ref_.chars().nth(0).unwrap()
@@ -106,50 +140,10 @@ pub fn annotate_ancestral_allele(taf: &String, vcf: &String, ancestors: &String,
                         break;
                     }
                 }
-                // println!("Ancestral allele for {} is not a valid base: {}", species, allele);
             }
-            // println!("Ancestral allele not found for {}", species);
         }
 
-        // Majority rule: not good for tsinfer though...
-        /*
         if ancestral_allele.is_none() {
-            // Try to get it via majority rule
-            // (But exclude the reference species.)
-            let mut allele_counts = std::collections::HashMap::new();
-            for (species, allele) in column.column.alleles.iter().enumerate() {
-                if species == 0 {
-                    continue;
-                }
-                let allele = allele.to_ascii_uppercase();
-                if allele != '-' && allele != 'N' && allele != '*' {
-                    *allele_counts.entry(allele).or_insert(0) += 1;
-                }
-            }
-
-            let mut max_count = 0;
-            let mut max_allele = None;
-            for (allele, count) in allele_counts.iter() {
-                if *count > max_count {
-                    max_count = *count;
-                    max_allele = Some(allele);
-                }
-            }
-
-            if let Some(allele) = max_allele {
-                if *allele == record.ref_.chars().nth(0).unwrap()
-                    || *allele == record.alt.chars().nth(0).unwrap()
-                {
-                    ancestral_allele = Some(allele.clone());
-                    ancestral_by_majority += 1;
-                }
-            }
-        }  */
-
-        if ancestral_allele.is_none() {
-            // println!("No ancestral allele found for SNP at {}:{} ({}). Skipping...", record.chrom, record.pos, record.id);
-            // panic!("Ancestral allele not found");
-            // continue;
             ancestral_missing += 1;
             continue;
         }
@@ -161,8 +155,7 @@ pub fn annotate_ancestral_allele(taf: &String, vcf: &String, ancestors: &String,
             ancestral_not_found += 1;
         }
 
-        // Write to output file
-        // You need a tab-delimited file with CHROM, POS, and the AA field as the 3rd column.
+        // Write the annotation to output.
         out_aa
             .write_all(
                 format!(
@@ -173,15 +166,15 @@ pub fn annotate_ancestral_allele(taf: &String, vcf: &String, ancestors: &String,
             )
             .unwrap();
 
+        // Cache the column for the next record.
+        column = Some(col.clone());
     }
-    println!("Done");
 
+    println!("Done");
     println!("Ancestral matches: {}", ancestral_matches);
     println!("Ancestral not found: {}", ancestral_not_found);
     println!("Ancestral missing: {}", ancestral_missing);
     println!("Ancestral by majority: {}", ancestral_by_majority);
-
-    // Print fraction
     let total = ancestral_matches + ancestral_not_found;
     let fraction = ancestral_matches as f64 / total as f64;
     println!("Fraction ancestral matches: {}", fraction);
