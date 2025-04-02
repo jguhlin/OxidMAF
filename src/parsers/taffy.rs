@@ -14,7 +14,7 @@ pub struct TafHeader {
     pub tags: HashMap<String, String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TafColumn {
     pub raw_bases: String,
     pub alleles: Vec<char>,
@@ -31,7 +31,7 @@ pub struct Coordinate {
     pub sequence_length: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CoordinateOp {
     Insertion {
         row: usize,
@@ -339,8 +339,8 @@ fn parse_tags(tokens: &[&str]) -> HashMap<String, String> {
 
 /// An alignment iterator that wraps the TafParser and maintains two mappings:
 /// one for species names and one for current coordinates (updated by coordinate ops).
-pub struct TafAlignmentIterator<'a, R: BufRead> {
-    parser: &'a mut TafParser<R>,
+pub struct TafAlignmentIterator<R: BufRead> {
+    parser: TafParser<R>,
     /// Mapping from row index to species name (if known).
     species_map: Vec<Option<String>>,
     /// Mapping from row index to the current coordinate for that row.
@@ -349,7 +349,7 @@ pub struct TafAlignmentIterator<'a, R: BufRead> {
 }
 
 /// A structure holding a column plus the current species mapping, coordinates, and its index.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TafAlignmentColumn {
     /// The parsed column.
     pub column: TafColumn,
@@ -361,9 +361,9 @@ pub struct TafAlignmentColumn {
     pub col_index: usize,
 }
 
-impl<'a, R: BufRead> TafAlignmentIterator<'a, R> {
+impl<R: BufRead> TafAlignmentIterator<R> {
     /// Create a new alignment iterator from the given parser.
-    pub fn new(parser: &'a mut TafParser<R>) -> Self {
+    pub fn new(parser: TafParser<R>) -> Self {
         TafAlignmentIterator {
             parser,
             species_map: Vec::new(),
@@ -373,7 +373,7 @@ impl<'a, R: BufRead> TafAlignmentIterator<'a, R> {
     }
 }
 
-impl<'a, R: BufRead> Iterator for TafAlignmentIterator<'a, R> {
+impl<R: BufRead> Iterator for TafAlignmentIterator<R> {
     type Item = Result<TafAlignmentColumn, String>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -554,5 +554,55 @@ impl TafIndex {
             });
         }
         Ok(TafIndex { entries })
+    }
+
+    /// Returns an iterator over index entries for a given contig.
+    ///
+    /// The iterator starts at the header entry matching the provided contig name
+    /// and then yields subsequent entries (usually marked with "*")
+    /// until the next header (i.e. a non-"*" entry with a different contig name)
+    /// is encountered. When that happens, the iterator will return `None`.
+    pub fn iter_contig(&self, contig: &str) -> Option<TafIndexContigIterator> {
+        // Find the first occurrence where entry.species equals the contig name.
+        let start_index = self
+            .entries
+            .iter()
+            .position(|e| e.species.as_deref() == Some(contig))?;
+        let entries_slice = &self.entries[start_index..];
+        Some(TafIndexContigIterator {
+            entries: entries_slice,
+            target: contig.to_string(),
+            pos: 0,
+        })
+    }
+}
+
+/// An iterator over a contiguous block of index entries for a single contig.
+/// The block starts with an entry whose species is the contig name and is
+/// followed by entries with "*" until a new header is encountered.
+pub struct TafIndexContigIterator<'a> {
+    entries: &'a [TafIndexEntry],
+    target: String,
+    pos: usize,
+}
+
+impl<'a> Iterator for TafIndexContigIterator<'a> {
+    type Item = &'a TafIndexEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos < self.entries.len() {
+            let entry = &self.entries[self.pos];
+            // If we encounter a header (a Some value) that does not match the target,
+            // then we’ve reached the start of a new contig and we stop iterating.
+            if let Some(ref sp) = entry.species {
+                if sp != &self.target && self.pos != 0 {
+                    return None;
+                }
+            }
+            self.pos += 1;
+            Some(entry)
+        } else {
+            None
+        }
     }
 }
