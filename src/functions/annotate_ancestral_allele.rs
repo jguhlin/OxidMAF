@@ -1,20 +1,6 @@
-use std::io::{BufReader, Seek, SeekFrom, Write};
-use std::fs::File;
 use crate::parsers::*;
-
-/// Helper function that reopens the TAF file, seeks to a given offset, and returns a new alignment iterator.
-/// (This approach avoids lifetime issues with holding a mutable borrow on a single file.)
-fn create_alignment_iterator_from_path(
-    taf_path: &str,
-    offset: u64,
-) -> TafAlignmentIterator<BufReader<File>> {
-    let mut file = File::open(taf_path).unwrap();
-    file.seek(SeekFrom::Start(offset)).unwrap();
-    let buf_reader = BufReader::new(file);
-    let parser = TafParser::new(buf_reader).unwrap();
-    TafAlignmentIterator::new(parser)
-}
-
+use std::fs::File;
+use std::io::{BufReader, Seek, SeekFrom, Write};
 
 // This function now expects that a corresponding TAF index (.tai) file exists.
 // It also assumes that the TAF file is uncompressed (or that seeking is supported).
@@ -33,10 +19,7 @@ pub fn annotate_ancestral_allele(taf: &String, vcf: &String, ancestors: &String,
     let mut out_remove = std::fs::File::create(format!("{}_remove.tsv", output)).unwrap();
     let mut out_remove = std::io::BufWriter::new(out_remove);
 
-    let ancestors: Vec<usize> = ancestors
-        .split(',')
-        .map(|x| x.parse().unwrap())
-        .collect();
+    let ancestors: Vec<usize> = ancestors.split(',').map(|x| x.parse().unwrap()).collect();
 
     let mut vcf_reader = VcfParser::from_file(vcf); // Assume you have a VCF parser.
 
@@ -44,23 +27,15 @@ pub fn annotate_ancestral_allele(taf: &String, vcf: &String, ancestors: &String,
     let taf_index_path = format!("{}.tai", taf);
     let taf_index = TafIndex::load(&taf_index_path).expect("Failed to load TAF index");
 
-    // Helper: Given a seek offset into the TAF file, reinitialize a new alignment iterator.
-    fn create_alignment_iterator<R>(mut reader: R, offset: u64) -> TafAlignmentIterator<R>
-    where
-        R: std::io::BufRead + Seek,
-    {
-        reader.seek(SeekFrom::Start(offset)).unwrap();
-        // Create a new parser; note that the header should appear at the offset.
-        let parser = TafParser::new(reader).unwrap();
-        TafAlignmentIterator::new(parser)
-    }
-
     // Keep track of the current chromosome and alignment iterator.
     let mut current_chrom = String::new();
     // We use an Option so we can reinitialize when the chromosome changes.
-    let mut align_iter: Option<TafAlignmentIterator<BufReader<std::fs::File>>> = None;
+    let mut align_iter: Option<TafAlignmentIterator> = None;
     // Cache the current alignment column.
     let mut column: Option<TafAlignmentColumn> = None;
+
+    let mut taffy = TafParser::from_file(taf.as_str()).unwrap();
+    let taf_index = TaiIndex::from_file(&format!("{}.tai", taf)).unwrap();
 
     // Statistics counters.
     let mut ancestral_matches = 0;
@@ -73,21 +48,13 @@ pub fn annotate_ancestral_allele(taf: &String, vcf: &String, ancestors: &String,
         if current_chrom != record.chrom {
             current_chrom = record.chrom.clone();
             // Use the TAF index to get an iterator for this contig.
-            if let Some(mut contig_iter) = taf_index.iter_contig(&current_chrom) {
-                // The first entry for the contig gives the file offset.
-                let start_offset = contig_iter.next().unwrap().offset;
-                let taf_file = std::fs::File::open(taf).unwrap();
-                let buf_reader = BufReader::new(taf_file);
-                align_iter = Some(create_alignment_iterator(buf_reader, start_offset));
-                // Fetch the first alignment column for this chromosome.
-                column = align_iter
-                    .as_mut()
-                    .and_then(|it| it.next().transpose().ok().flatten());
-            } else {
-                // No alignment found for this chromosome; skip records.
-                eprintln!("No TAF alignment found for chromosome {}", record.chrom);
-                continue;
-            }
+            let seek_info = taf_index.get_seek_info(&current_chrom, 1).unwrap();
+            drop(align_iter);
+            taffy.seek_to(seek_info.0, seek_info.1);
+            align_iter = Some(TafAlignmentIterator::new(&mut taffy));
+            column = align_iter
+                .as_mut()
+                .and_then(|it| it.next().transpose().ok().flatten());
         }
 
         // If we don't have a current column, skip the record.
@@ -158,11 +125,7 @@ pub fn annotate_ancestral_allele(taf: &String, vcf: &String, ancestors: &String,
         // Write the annotation to output.
         out_aa
             .write_all(
-                format!(
-                    "{}\t{}\t{}\n",
-                    record.chrom, record.pos, ancestral_allele
-                )
-                .as_bytes(),
+                format!("{}\t{}\t{}\n", record.chrom, record.pos, ancestral_allele).as_bytes(),
             )
             .unwrap();
 
